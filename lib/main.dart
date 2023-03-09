@@ -1,7 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:redux/redux.dart';
 import 'package:flutter_redux/flutter_redux.dart';
-import 'package:flutter_hooks/flutter_hooks.dart' as hooks;
 
 void main() {
   runApp(const MyApp());
@@ -22,101 +25,111 @@ class MyApp extends StatelessWidget {
   }
 }
 
-enum ItemFilter {
-  all,
-  longTexts,
-  shortTexts,
-}
+const apiUrl = 'http://127.0.0.1:5500/api/people.json';
 
 @immutable
-class State {
-  final Iterable<String> items;
-  final ItemFilter filter;
+class Person {
+  final String name;
+  final int age;
 
-  const State({
-    required this.items,
-    required this.filter,
+  const Person({
+    required this.name,
+    required this.age,
   });
 
-  Iterable<String> get filteredItems {
-    switch (filter) {
-      case ItemFilter.all:
-        return items;
-      case ItemFilter.longTexts:
-        return items.where((element) => element.length >= 10);
-      case ItemFilter.shortTexts:
-        return items.where((element) => element.length <= 3);
-    }
-  }
+  Person.fromJson(Map<String, dynamic> json)
+      : name = json['name'] as String,
+        age = json['age'] as int;
+
+  @override
+  String toString() => 'Person ($name, $age years old)';
 }
 
-@immutable
-class ChangeFilterTypeAction extends Action {
-  final ItemFilter filter;
-  const ChangeFilterTypeAction(this.filter);
-}
+Future<Iterable<Person>> getPersons() => HttpClient()
+    .getUrl(Uri.parse(apiUrl))
+    .then((req) => req.close())
+    .then((resp) => resp.transform(utf8.decoder).join())
+    .then((str) => json.decode(str) as List<dynamic>)
+    .then((list) => list.map((e) => Person.fromJson(e)));
 
 @immutable
 abstract class Action {
   const Action();
 }
 
-@immutable
-abstract class ItemAction extends Action {
-  final String item;
-
-  const ItemAction(this.item);
+class LoadPeopleAction extends Action {
+  const LoadPeopleAction();
 }
 
 @immutable
-class AddItemAction extends ItemAction {
-  const AddItemAction(String item) : super(item);
+class SuccessfullyFetchedPeopleAction extends Action {
+  final Iterable<Person> persons;
+  const SuccessfullyFetchedPeopleAction({required this.persons});
 }
 
 @immutable
-class RemoveItemAction extends ItemAction {
-  const RemoveItemAction(String item) : super(item);
+class FailedToFetchPeopleAction extends Action {
+  final Object error;
+  const FailedToFetchPeopleAction({required this.error});
 }
 
-extension AddRemoveItems<T> on Iterable<T> {
-  Iterable<T> operator +(T other) => followedBy([other]);
-  Iterable<T> operator -(T other) => where((element) => element != other);
+@immutable
+class State {
+  final bool isLoading;
+  final Iterable<Person>? fetchedPersons;
+  final Object? error;
+
+  const State({
+    required this.isLoading,
+    required this.fetchedPersons,
+    required this.error,
+  });
+
+  const State.initial()
+      : isLoading = false,
+        fetchedPersons = null,
+        error = null;
 }
 
-Iterable<String> addItemReducer(
-  Iterable<String> previousItems,
-  AddItemAction action,
-) =>
-    previousItems + action.item;
-
-Iterable<String> removeItemReducer(
-  Iterable<String> previousItems,
-  RemoveItemAction action,
-) =>
-    previousItems - action.item;
-
-Reducer<Iterable<String>> itemsReducer = combineReducers<Iterable<String>>([
-  TypedReducer<Iterable<String>, AddItemAction>(addItemReducer),
-  TypedReducer<Iterable<String>, RemoveItemAction>(removeItemReducer),
-]);
-
-ItemFilter itemFilterReducer(
-  State oldState,
-  Action action,
-) {
-  if (action is ChangeFilterTypeAction) {
-    return action.filter;
-  } else {
-    return oldState.filter;
-  }
-}
-
-State appStateReducer(State oldState, action) => State(
-      items: itemsReducer(oldState.items, action),
-      filter: itemFilterReducer(oldState, action),
+State reducer(State oldState, action) {
+  if (action is LoadPeopleAction) {
+    return const State(
+      error: null,
+      fetchedPersons: null,
+      isLoading: true,
     );
+  } else if (action is SuccessfullyFetchedPeopleAction) {
+    return State(
+      error: null,
+      fetchedPersons: action.persons,
+      isLoading: false,
+    );
+  } else if (action is FailedToFetchPeopleAction) {
+    return State(
+      error: action.error,
+      fetchedPersons: oldState.fetchedPersons,
+      isLoading: false,
+    );
+  }
+  return oldState;
+}
 
-class MyHomePage extends hooks.HookWidget {
+void loadPeopleMiddleware(
+  Store<State> store,
+  action,
+  NextDispatcher next,
+) {
+  if (action is LoadPeopleAction) {
+    getPersons().then((persons) {
+      store.dispatch(SuccessfullyFetchedPeopleAction(persons: persons));
+    }).catchError((e) {
+      store.dispatch(FailedToFetchPeopleAction(error: e));
+    });
+  }
+  next(action);
+}
+
+class MyHomePage extends StatelessWidget {
   const MyHomePage({super.key, required this.title});
 
   final String title;
@@ -124,13 +137,10 @@ class MyHomePage extends hooks.HookWidget {
   @override
   Widget build(BuildContext context) {
     final store = Store(
-      appStateReducer,
-      initialState: const State(
-        items: [],
-        filter: ItemFilter.all,
-      ),
+      reducer,
+      initialState: const State.initial(),
+      middleware: [loadPeopleMiddleware],
     );
-    final textController = hooks.useTextEditingController();
     return Scaffold(
       appBar: AppBar(
         title: Text(title),
@@ -139,75 +149,42 @@ class MyHomePage extends hooks.HookWidget {
         store: store,
         child: Column(
           children: [
-            Row(
-              children: [
-                TextButton(
-                  onPressed: () {
-                    store.dispatch(
-                      const ChangeFilterTypeAction(ItemFilter.all),
-                    );
-                  },
-                  child: const Text('All'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    store.dispatch(
-                      const ChangeFilterTypeAction(ItemFilter.shortTexts),
-                    );
-                  },
-                  child: const Text('Short items'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    store.dispatch(
-                      const ChangeFilterTypeAction(ItemFilter.longTexts),
-                    );
-                  },
-                  child: const Text('Long items'),
-                ),
-              ],
+            TextButton(
+              onPressed: () {
+                store.dispatch(const LoadPeopleAction());
+              },
+              child: const Text('Load persons'),
             ),
-            TextField(
-              controller: textController,
-            ),
-            Row(
-              children: [
-                TextButton(
-                  onPressed: () {
-                    final text = textController.text;
-                    store.dispatch(
-                      AddItemAction(text),
-                    );
-                    textController.clear();
-                  },
-                  child: const Text('Add'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    final text = textController.text;
-                    store.dispatch(
-                      RemoveItemAction(text),
-                    );
-                  },
-                  child: const Text('Remove'),
-                ),
-              ],
-            ),
-            StoreConnector<State, Iterable<String>>(
-              converter: (store) => store.state.filteredItems,
-              builder: (context, items) {
-                return Expanded(
-                  child: ListView.builder(
-                      itemCount: items.length,
-                      itemBuilder: (context, index) {
-                        final item = items.elementAt(index);
-                        return ListTile(
-                          title: Text(item),
-                        );
-                      }),
-                );
+            StoreConnector<State, bool>(
+              converter: (store) => store.state.isLoading,
+              builder: (context, isLoading) {
+                if (isLoading) {
+                  return const CircularProgressIndicator();
+                } else {
+                  return const SizedBox();
+                }
               },
             ),
+            StoreConnector<State, Iterable<Person>?>(
+              converter: (store) => store.state.fetchedPersons,
+              builder: (context, people) {
+                if (people == null) {
+                  return const SizedBox();
+                }
+                return Expanded(
+                  child: ListView.builder(
+                    itemCount: people.length,
+                    itemBuilder: (context, index) {
+                      final person = people.elementAt(index);
+                      return ListTile(
+                        title: Text(person.name),
+                        subtitle: Text('${person.age} years old'),
+                      );
+                    },
+                  ),
+                );
+              },
+            )
           ],
         ),
       ),
